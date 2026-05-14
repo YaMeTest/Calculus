@@ -36,25 +36,32 @@ const KNOWN_TOKEN_BY_ADDRESS = {
 };
 
 const ALLOWED_PAIR_TOKENS = new Set(['USDT', 'USDC', 'BUSD', 'ETH', 'BTCB', 'CAKE', 'WBNB', 'SIREN']);
+const PREFERRED_FUNDING_TOKENS = ['USDT', 'USDC', 'BUSD'];
 
 function inferCoinPair(cashflows = []) {
   const symbols = new Map();
   for (const tx of cashflows) {
     const maybeSymbol = String(tx.assetSymbol || '').toUpperCase();
+    const weightedAmount = Math.max(1, Number(tx.valueAmount || 0));
     if (ALLOWED_PAIR_TOKENS.has(maybeSymbol)) {
-      symbols.set(maybeSymbol, (symbols.get(maybeSymbol) || 0) + 1);
+      symbols.set(maybeSymbol, (symbols.get(maybeSymbol) || 0) + weightedAmount);
     }
     for (const addr of [tx.from, tx.to]) {
       const key = String(addr || '').toLowerCase();
       const mapped = KNOWN_TOKEN_BY_ADDRESS[key];
       if (mapped && ALLOWED_PAIR_TOKENS.has(mapped)) {
-        symbols.set(mapped, (symbols.get(mapped) || 0) + 1);
+        symbols.set(mapped, (symbols.get(mapped) || 0) + 0.2);
       }
     }
   }
 
-  const preferred = [...symbols.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 'USDT';
-  return `BNB/${preferred}`;
+  const ranked = [...symbols.entries()].sort((a, b) => b[1] - a[1]).map(([s]) => s);
+  const quote = PREFERRED_FUNDING_TOKENS.find((s) => ranked.includes(s)) || 'USDT';
+  const base = ranked.find((s) => !PREFERRED_FUNDING_TOKENS.includes(s) && s !== quote && s !== 'WBNB')
+    || ranked.find((s) => s === 'WBNB')
+    || 'BNB';
+
+  return `${base === 'WBNB' ? 'BNB' : base}/${quote}`;
 }
 
 function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
@@ -77,6 +84,9 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
   let internalTransfers = 0;
   let externalTransfers = 0;
 
+  const tokenIn = new Map();
+  const tokenOut = new Map();
+
   for (const tx of sorted) {
     const value = Number(tx.valueBnb || 0);
     const gas = Number(tx.gasFeeBnb || 0);
@@ -85,6 +95,13 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
     if (direction === 'out') investedBnb += value;
     else withdrawnBnb += value;
 
+    const symbol = String(tx.assetSymbol || '').toUpperCase();
+    const amount = Number(tx.valueAmount || 0);
+    if (symbol && Number.isFinite(amount) && amount > 0) {
+      const bucket = direction === 'out' ? tokenOut : tokenIn;
+      bucket.set(symbol, Number(((bucket.get(symbol) || 0) + amount).toFixed(12)));
+    }
+
     totalGasBnb += gas;
     transferCount += Number(tx.transferCount || 1);
     internalTransfers += Number(tx.internalTransferCount || 0);
@@ -92,8 +109,15 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
   }
 
   const openingBalanceBnb = Number(sorted[0].balanceBeforeBnb || 0);
-  const startAmount = investedBnb + totalGasBnb;
-  const netProfit = withdrawnBnb - investedBnb - totalGasBnb;
+  const accountingSymbol = PREFERRED_FUNDING_TOKENS.find((s) => tokenIn.has(s) || tokenOut.has(s))
+    || [...new Set([...tokenIn.keys(), ...tokenOut.keys()])][0]
+    || 'BNB';
+  const tokenInvested = Number(tokenOut.get(accountingSymbol) || 0);
+  const tokenWithdrawn = Number(tokenIn.get(accountingSymbol) || 0);
+  const startAmount = accountingSymbol === 'BNB' ? investedBnb + totalGasBnb : tokenInvested;
+  const netProfit = accountingSymbol === 'BNB'
+    ? withdrawnBnb - investedBnb - totalGasBnb
+    : tokenWithdrawn - tokenInvested;
   const endAmount = startAmount + netProfit;
   const profit = netProfit;
   const apr = startAmount > 0 && durationDays > 0 ? ((profit / startAmount) * (365 / durationDays) * 100) : 0;
@@ -103,6 +127,7 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
     endDate: last.timestamp,
     durationDays,
     coin: coinPair,
+    accountingSymbol,
     chain: 'BSC',
     startAmount: Number(startAmount.toFixed(8)),
     endAmount: Number(endAmount.toFixed(8)),
@@ -229,7 +254,7 @@ async function buildDerivedPositions(cashflows = [], address = '') {
   const raw = segments
     .map(segment => buildDerivedPosition(segment, address, inferCoinPair(segment)))
     .filter(Boolean)
-    .filter(p => p.investedBnb > 0.01 && p.withdrawnBnb > 0.01);
+    .filter(p => p.investedBnb > 0.000001 || p.withdrawnBnb > 0.000001);
 
   const enriched = await Promise.all(raw.map(async (position) => {
     const symbols = String(position.coin || '').split('/').filter(Boolean);
@@ -342,7 +367,10 @@ const server = http.createServer(async (req, res) => {
       };
 
       const parsed = txs.filter(t => t && t.hash).map(t => {
-        const valueBnb = Number(t.value || 0) / 1e18;
+        const decimals = Number(t.rawContract?.decimal || (t.asset ? 18 : 18));
+        const valueRaw = Number(t.value || 0);
+        const valueAmount = decimals >= 0 ? valueRaw / (10 ** decimals) : 0;
+        const valueBnb = !t.asset ? valueAmount : 0;
         const direction = t.to?.toLowerCase() === address.toLowerCase() ? 'in' : 'out';
         const gasUsed = Number(t.gasUsed || t.receipt?.gasUsed || 0);
         const gasPriceWei = Number(t.gasPrice || t.effectiveGasPrice || 0);
@@ -352,7 +380,9 @@ const server = http.createServer(async (req, res) => {
         return {
           txHash: t.hash, timestamp: parseTimestamp(rawTimestamp),
           from: t.from, to: t.to, valueBnb: Number(valueBnb.toFixed(8)),
-          assetSymbol: t.asset || t.rawContract?.symbol || null,
+          assetSymbol: (t.asset || t.rawContract?.symbol || null),
+          valueAmount: Number(valueAmount.toFixed(12)),
+          tokenDecimals: decimals,
           direction,
           gasPriceWei,
           gasUsed,
