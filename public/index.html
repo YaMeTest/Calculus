@@ -1,0 +1,86 @@
+<!doctype html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LP Position Tracker</title>
+  <style>
+    body { font-family: Arial, sans-serif; margin: 20px; }
+    table { width: 100%; border-collapse: collapse; margin-top: 15px; font-size: 12px; }
+    th, td { border: 1px solid #ccc; padding: 6px; }
+    input { width: 100%; box-sizing: border-box; }
+    .row { display: grid; grid-template-columns: repeat(5, 1fr); gap: 8px; }
+    button { padding: 8px 12px; margin-top: 8px; }
+    .small { color: #666; font-size: 12px; }
+  </style>
+</head>
+<body>
+  <h2>Liquid Pool P&L Tracker</h2>
+
+  <div class="row" id="form"></div>
+  <button onclick="savePosition()">Добавить позицию</button>
+
+  <h3>Позиции</h3>
+  <table id="positionsTable"></table>
+
+  <h3>Импорт транзакций (BSC)</h3>
+  <input id="wallet" placeholder="0x... MetaMask address" />
+  <button onclick="scrape()">Скрапить транзакции</button>
+  <p class="small">Показывает переводные cashflow-события; типы операций можно доразметить вручную.</p>
+  <table id="cashflowsTable"></table>
+
+<script>
+const columns = [
+  'date','startAmount','startPrice','rangeFrom','rangeTo','coin','chain','endAmount','endDate','durationDays','notes'
+];
+
+const form = document.getElementById('form');
+form.innerHTML = columns.map(c => `<div><label>${c}</label><input id="${c}" /></div>`).join('');
+
+async function load() {
+  const positions = await fetch('/api/positions').then(r=>r.json());
+  renderPositions(positions);
+  const cashflows = await fetch('/api/cashflows').then(r=>r.json());
+  renderCashflows(cashflows.slice(0,100));
+}
+
+function renderPositions(rows) {
+  const head = [...columns, 'profit', 'realApr', 'actions'];
+  const html = [`<tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr>`];
+  for (const r of rows) {
+    html.push(`<tr>${columns.map(c=>`<td>${r[c] ?? ''}</td>`).join('')}<td>${r.profit}</td><td>${r.realApr}</td><td><button onclick="del('${r.id}')">X</button></td></tr>`);
+  }
+  document.getElementById('positionsTable').innerHTML = html.join('');
+}
+
+function renderCashflows(rows) {
+  const cols = ['timestamp','txHash','valueBnb','action','from','to','note'];
+  const html = [`<tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr>`];
+  for (const r of rows) {
+    html.push(`<tr>${cols.map(c=>`<td>${r[c] ?? ''}</td>`).join('')}</tr>`);
+  }
+  document.getElementById('cashflowsTable').innerHTML = html.join('');
+}
+
+async function savePosition() {
+  const payload = Object.fromEntries(columns.map(c => [c, document.getElementById(c).value]));
+  await fetch('/api/positions', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
+  load();
+}
+
+async function del(id) {
+  await fetch('/api/positions/' + id, {method:'DELETE'});
+  load();
+}
+
+async function scrape() {
+  const address = document.getElementById('wallet').value.trim();
+  const out = await fetch('/api/scrape', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address})}).then(r=>r.json());
+  alert(`Импортировано: ${out.imported ?? 0}`);
+  load();
+}
+
+load();
+</script>
+</body>
+</html>
