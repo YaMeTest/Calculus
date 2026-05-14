@@ -35,30 +35,24 @@ const KNOWN_TOKEN_BY_ADDRESS = {
   '0xe3478b0bb1a5084567c319096437924948be1964': 'SIREN'
 };
 
-const ALLOWED_PAIR_TOKENS = new Set(['USDT', 'USDC', 'BUSD', 'ETH', 'BTCB', 'CAKE', 'WBNB', 'SIREN']);
+const ALLOWED_PAIR_TOKENS = new Set(['USDT', 'USDC', 'BUSD', 'ETH', 'BTCB', 'BNB', 'WBNB', 'CAKE', 'SIREN']);
 const PREFERRED_FUNDING_TOKENS = ['USDT', 'USDC', 'BUSD'];
 
 function inferCoinPair(cashflows = []) {
   const symbols = new Map();
   for (const tx of cashflows) {
     const maybeSymbol = String(tx.assetSymbol || '').toUpperCase();
-    const weightedAmount = Math.max(1, Number(tx.valueAmount || 0));
-    if (ALLOWED_PAIR_TOKENS.has(maybeSymbol)) {
+    const weightedAmount = Math.max(0, Number(tx.valueAmount || 0));
+    if (ALLOWED_PAIR_TOKENS.has(maybeSymbol) && weightedAmount > 0) {
       symbols.set(maybeSymbol, (symbols.get(maybeSymbol) || 0) + weightedAmount);
-    }
-    for (const addr of [tx.from, tx.to]) {
-      const key = String(addr || '').toLowerCase();
-      const mapped = KNOWN_TOKEN_BY_ADDRESS[key];
-      if (mapped && ALLOWED_PAIR_TOKENS.has(mapped)) {
-        symbols.set(mapped, (symbols.get(mapped) || 0) + 0.2);
-      }
     }
   }
 
   const ranked = [...symbols.entries()].sort((a, b) => b[1] - a[1]).map(([s]) => s);
   const quote = PREFERRED_FUNDING_TOKENS.find((s) => ranked.includes(s)) || 'USDT';
-  const base = ranked.find((s) => !PREFERRED_FUNDING_TOKENS.includes(s) && s !== quote && s !== 'WBNB')
-    || ranked.find((s) => s === 'WBNB')
+  const nonQuote = ranked.filter((s) => !PREFERRED_FUNDING_TOKENS.includes(s));
+  const base = nonQuote.find((s) => s !== quote && s !== 'CAKE')
+    || nonQuote[0]
     || 'BNB';
 
   return `${base === 'WBNB' ? 'BNB' : base}/${quote}`;
@@ -110,6 +104,7 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
 
   const openingBalanceBnb = Number(sorted[0].balanceBeforeBnb || 0);
   const accountingSymbol = PREFERRED_FUNDING_TOKENS.find((s) => tokenIn.has(s) || tokenOut.has(s))
+    || ([...new Set([...tokenIn.keys(), ...tokenOut.keys()])].find((s) => s !== 'CAKE'))
     || [...new Set([...tokenIn.keys(), ...tokenOut.keys()])][0]
     || 'BNB';
   const tokenInvested = Number(tokenOut.get(accountingSymbol) || 0);
@@ -294,9 +289,12 @@ const server = http.createServer(async (req, res) => {
     const data = readData();
     const manual = (data.positions || []).map(calcMetrics);
     const derived = await buildDerivedPositions(data.cashflows || [], data.lastScrapedAddress || '');
-    return sendJson(res, 200, [...derived, ...manual]);
+    return sendJson(res, 200, [...derived, ...manual].sort((a, b) => new Date(b.date) - new Date(a.date)));
   }
-  else if (pathname === '/api/cashflows' && req.method === 'GET') return sendJson(res, 200, readData().cashflows || []);
+  else if (pathname === '/api/cashflows' && req.method === 'GET') {
+    const cashflows = (readData().cashflows || []).sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
+    return sendJson(res, 200, cashflows);
+  }
   else if (pathname === '/api/scrape' && req.method === 'POST') {
 
     const { address } = await readBody(req);
@@ -395,9 +393,9 @@ const server = http.createServer(async (req, res) => {
           actionType: direction === 'in' ? 'in' : 'out'
         };
       });
-      parsed.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+      parsed.sort((a, b) => new Date(b.timestamp) - new Date(a.timestamp));
       let runningBalance = 0;
-      for (const row of parsed) {
+      for (const row of [...parsed].reverse()) {
         row.balanceBeforeBnb = Number(runningBalance.toFixed(8));
         runningBalance += row.direction === 'in' ? row.valueBnb : -row.valueBnb - row.gasFeeBnb;
       }

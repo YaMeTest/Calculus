@@ -51,7 +51,7 @@ function renderPositions(rows) {
 }
 
 function renderCashflows(rows) {
-  const cols = ['timestamp','txHash','valueBnb','from','to'];
+  const cols = ['timestamp','txHash','assetSymbol','valueAmount','valueBnb','direction','from','to'];
   const html = [`<tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr>`];
   for (const r of rows) {
     html.push(`<tr>${cols.map(c=>`<td>${r[c] ?? ''}</td>`).join('')}</tr>`);
