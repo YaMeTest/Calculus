@@ -37,6 +37,7 @@ const KNOWN_TOKEN_BY_ADDRESS = {
 
 const ALLOWED_PAIR_TOKENS = new Set(['USDT', 'USDC', 'BUSD', 'ETH', 'BTCB', 'CAKE', 'WBNB', 'SIREN']);
 const PREFERRED_FUNDING_TOKENS = ['USDT', 'USDC', 'BUSD'];
+const PREFERRED_FUNDING_TOKENS = ['USDT', 'USDC', 'BUSD'];
 
 function inferCoinPair(cashflows = []) {
   const symbols = new Map();
