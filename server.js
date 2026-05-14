@@ -70,8 +70,19 @@ const server = http.createServer(async (req, res) => {
     try {
       const response = await fetch(api);
       const json = await response.json();
-      const txs = (json.result || []).slice(0, 300);
-      const parsed = txs.filter(t => t.isError === '0').map(t => {
+      if (!response.ok) {
+        return sendJson(res, 502, { error: 'bscscan request failed', status: response.status });
+      }
+
+      if (!Array.isArray(json.result)) {
+        return sendJson(res, 502, {
+          error: 'bscscan returned unexpected payload',
+          details: json.message || json.result || 'unknown error'
+        });
+      }
+
+      const txs = json.result.slice(0, 300);
+      const parsed = txs.filter(t => t && t.isError === '0').map(t => {
         const valueBnb = Number(t.value) / 1e18;
         const direction = t.to?.toLowerCase() === address.toLowerCase() ? 'in' : 'out';
         return {
