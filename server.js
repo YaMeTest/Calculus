@@ -65,40 +65,50 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/api/scrape' && req.method === 'POST') {
     const { address } = await readBody(req);
     if (!address) return sendJson(res, 400, { error: 'address is required' });
-    const key = process.env.ROUTESCAN_API_KEY || process.env.BSCSCAN_API_KEY || process.env.ETHERSCAN_API_KEY || '';
-    const params = new URLSearchParams({
-      chainid: '56',
-      module: 'account',
-      action: 'txlist',
-      address,
-      sort: 'desc'
-    });
-    if (key) params.set('apikey', key);
-    const api = `https://api.routescan.io/v2/network/mainnet/evm/56/etherscan/api?${params.toString()}`;
+    const key = process.env.MEGANODE_API_KEY || process.env.BSCTRACE_API_KEY || '';
+    if (!key) return sendJson(res, 400, { error: 'MEGANODE_API_KEY (or BSCTRACE_API_KEY) is required' });
+    const api = `https://bsc-mainnet.nodereal.io/v1/${key}`;
     try {
-      const response = await fetch(api);
-      const json = await response.json();
-      if (!response.ok) {
-        return sendJson(res, 502, { error: 'routescan request failed', status: response.status });
+      const makePayload = (direction) => ({
+        jsonrpc: '2.0',
+        method: 'nr_getAssetTransfers',
+        params: [{
+          [direction === 'in' ? 'toAddress' : 'fromAddress']: address,
+          category: ['external'],
+          withMetadata: true,
+          excludeZeroValue: true,
+          maxCount: '0x12c',
+          order: 'desc'
+        }],
+        id: direction === 'in' ? 1 : 2
+      });
+
+      const [inResponse, outResponse] = await Promise.all([
+        fetch(api, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(makePayload('in')) }),
+        fetch(api, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(makePayload('out')) })
+      ]);
+
+      const inJson = await inResponse.json();
+      const outJson = await outResponse.json();
+      if (!inResponse.ok || !outResponse.ok) {
+        return sendJson(res, 502, { error: 'BSCTrace request failed', status: { in: inResponse.status, out: outResponse.status } });
       }
 
-      if (!Array.isArray(json.result)) {
-        const details = json.result || json.message || 'unknown error';
-        const deprecatedV1 = typeof details === 'string' && details.toUpperCase().includes('NOTOK');
+      const inTransfers = inJson?.result?.transfers;
+      const outTransfers = outJson?.result?.transfers;
+      if (!Array.isArray(inTransfers) || !Array.isArray(outTransfers)) {
         return sendJson(res, 502, {
-          error: deprecatedV1
-            ? 'RouteScan returned an error payload. Set a valid ROUTESCAN_API_KEY if required.'
-            : 'routescan returned unexpected payload',
-          details
+          error: 'BSCTrace returned unexpected payload',
+          details: { in: inJson?.error || inJson?.result || inJson, out: outJson?.error || outJson?.result || outJson }
         });
       }
 
-      const txs = json.result.slice(0, 300);
-      const parsed = txs.filter(t => t && t.isError === '0').map(t => {
-        const valueBnb = Number(t.value) / 1e18;
+      const txs = [...inTransfers, ...outTransfers].slice(0, 300);
+      const parsed = txs.filter(t => t && t.hash).map(t => {
+        const valueBnb = Number(t.value || 0) / 1e18;
         const direction = t.to?.toLowerCase() === address.toLowerCase() ? 'in' : 'out';
         return {
-          txHash: t.hash, timestamp: new Date(Number(t.timeStamp) * 1000).toISOString(),
+          txHash: t.hash, timestamp: new Date(Number(t.metadata?.blockTimestamp || t.timeStamp || 0) * 1000).toISOString(),
           from: t.from, to: t.to, valueBnb: Number(valueBnb.toFixed(8)),
           action: direction === 'in' ? 'collect/reward/withdraw' : 'invest/reinvest/fee',
           note: 'Auto-imported. Verify LP operation type manually.'
