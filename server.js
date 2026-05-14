@@ -26,31 +26,34 @@ function notFound(res) { res.writeHead(404); res.end('Not found'); }
 
 const KNOWN_TOKEN_BY_ADDRESS = {
   '0x55d398326f99059ff775485246999027b3197955': 'USDT',
-  '0xe3478b0bb1a5084567c319096437924948be1964': 'SIREN',
-  '0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82': 'CAKE'
+  '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d': 'USDC',
+  '0xe9e7cea3dedca5984780bafc599bd69add087d56': 'BUSD',
+  '0x2170ed0880ac9a755fd29b2688956bd959f933f8': 'ETH',
+  '0x7130d2a12b9bcbaef4f2634d864a1ee1ce3ead9c': 'BTCB',
+  '0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82': 'CAKE',
+  '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c': 'WBNB'
 };
+
+const ALLOWED_PAIR_TOKENS = new Set(['USDT', 'USDC', 'BUSD', 'ETH', 'BTCB', 'CAKE']);
 
 function inferCoinPair(cashflows = []) {
   const symbols = new Map();
   for (const tx of cashflows) {
-    if (tx.assetSymbol) {
-      const s = String(tx.assetSymbol).toUpperCase();
-      if (/^[A-Z0-9]{2,15}$/.test(s)) symbols.set(s, (symbols.get(s) || 0) + 1);
+    const maybeSymbol = String(tx.assetSymbol || '').toUpperCase();
+    if (ALLOWED_PAIR_TOKENS.has(maybeSymbol)) {
+      symbols.set(maybeSymbol, (symbols.get(maybeSymbol) || 0) + 1);
     }
     for (const addr of [tx.from, tx.to]) {
       const key = String(addr || '').toLowerCase();
-      if (KNOWN_TOKEN_BY_ADDRESS[key]) {
-        const s = KNOWN_TOKEN_BY_ADDRESS[key];
-        symbols.set(s, (symbols.get(s) || 0) + 1);
+      const mapped = KNOWN_TOKEN_BY_ADDRESS[key];
+      if (mapped && ALLOWED_PAIR_TOKENS.has(mapped)) {
+        symbols.set(mapped, (symbols.get(mapped) || 0) + 1);
       }
     }
   }
-  const ranked = [...symbols.entries()]
-    .map(([symbol, count]) => ({ symbol, count }))
-    .filter(x => x.symbol !== 'BNB')
-    .sort((a, b) => b.count - a.count);
-  const preferred = ranked.find(x => x.symbol !== 'CAKE') || ranked[0];
-  return preferred ? `BNB/${preferred.symbol}` : 'BNB';
+
+  const preferred = [...symbols.entries()].sort((a, b) => b[1] - a[1])[0]?.[0] || 'USDT';
+  return `BNB/${preferred}`;
 }
 
 function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
@@ -89,8 +92,9 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
 
   const openingBalanceBnb = Number(sorted[0].balanceBeforeBnb || 0);
   const startAmount = investedBnb + totalGasBnb;
-  const endAmount = withdrawnBnb;
-  const profit = endAmount - startAmount;
+  const netProfit = withdrawnBnb - investedBnb - totalGasBnb;
+  const endAmount = startAmount + netProfit;
+  const profit = netProfit;
   const apr = startAmount > 0 && durationDays > 0 ? ((profit / startAmount) * (365 / durationDays) * 100) : 0;
 
   return {
@@ -157,13 +161,44 @@ async function fetchPancakePoolMeta(symbols = []) {
       tvlUsd: Number(pool.totalValueLockedUSD || 0),
       token0: pool.token0?.symbol || null,
       token1: pool.token1?.symbol || null,
+      token0Decimals: Number(pool.token0?.decimals || 18),
+      token1Decimals: Number(pool.token1?.decimals || 18),
+      sqrtPrice: pool.sqrtPrice || null,
       rangeFrom: null,
       rangeTo: null,
-      startPrice: null
+      startPrice: null,
     };
   } catch {
     return null;
   }
+}
+
+
+function toPriceFromSqrt(sqrtPrice, token0Decimals, token1Decimals) {
+  const sqrt = Number(sqrtPrice || 0);
+  if (!sqrt) return null;
+  const ratio = (sqrt / (2 ** 96)) ** 2;
+  return ratio * (10 ** (Number(token0Decimals || 18) - Number(token1Decimals || 18)));
+}
+
+function enrichPriceFields(position, meta) {
+  if (!meta?.token0 || !meta?.token1) return position;
+  const p01 = toPriceFromSqrt(meta.sqrtPrice, meta.token0Decimals, meta.token1Decimals);
+  if (!p01 || !Number.isFinite(p01)) return position;
+
+  const [base, quote] = String(position.coin || '').split('/');
+  let startPrice = null;
+  if (meta.token0 === base && meta.token1 === quote) startPrice = p01;
+  else if (meta.token1 === base && meta.token0 === quote) startPrice = 1 / p01;
+
+  if (!startPrice || !Number.isFinite(startPrice)) return position;
+  const band = 0.1;
+  return {
+    ...position,
+    startPrice: Number(startPrice.toFixed(8)),
+    rangeFrom: Number((startPrice * (1 - band)).toFixed(8)),
+    rangeTo: Number((startPrice * (1 + band)).toFixed(8))
+  };
 }
 
 async function buildDerivedPositions(cashflows = [], address = '') {
@@ -198,7 +233,7 @@ async function buildDerivedPositions(cashflows = [], address = '') {
   const enriched = await Promise.all(raw.map(async (position) => {
     const symbols = String(position.coin || '').split('/').filter(Boolean);
     const meta = await fetchPancakePoolMeta(symbols.slice(0, 2));
-    return meta ? { ...position, ...meta } : position;
+    return meta ? enrichPriceFields({ ...position, ...meta }, meta) : position;
   }));
 
   return enriched.sort((a, b) => new Date(b.date) - new Date(a.date));
