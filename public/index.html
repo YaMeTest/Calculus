@@ -33,16 +33,18 @@ const columns = [
 
 async function load() {
   const positions = await fetch('/api/positions').then(r=>r.json());
-  renderPosition(positions[0] || null);
+  renderPositions(positions || []);
   const cashflows = await fetch('/api/cashflows').then(r=>r.json());
   renderCashflows(cashflows);
 }
 
-function renderPosition(row) {
+function renderPositions(rows) {
   const head = [...columns, 'profit', 'realApr', 'actions'];
   const html = [`<tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr>`];
-  if (row) {
-    html.push(`<tr>${columns.map(c=>`<td>${row[c] ?? ''}</td>`).join('')}<td>${row.profit}</td><td>${row.realApr}</td><td></td></tr>`);
+  if (rows.length) {
+    for (const row of rows) {
+      html.push(`<tr>${columns.map(c=>`<td>${row[c] ?? ''}</td>`).join('')}<td>${row.profit}</td><td>${row.realApr}</td><td></td></tr>`);
+    }
   } else {
     html.push(`<tr><td colspan="14">Позиция не найдена.</td></tr>`);
   }
