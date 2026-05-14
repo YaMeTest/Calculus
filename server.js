@@ -32,12 +32,13 @@ const KNOWN_TOKEN_BY_ADDRESS = {
 function inferCoinPair(cashflows = []) {
   const symbols = new Set(['BNB']);
   for (const tx of cashflows) {
+    if (tx.assetSymbol) symbols.add(String(tx.assetSymbol).toUpperCase());
     for (const addr of [tx.from, tx.to]) {
       const key = String(addr || '').toLowerCase();
       if (KNOWN_TOKEN_BY_ADDRESS[key]) symbols.add(KNOWN_TOKEN_BY_ADDRESS[key]);
     }
   }
-  return [...symbols].join('');
+  return [...symbols].slice(0, 3).join('/');
 }
 
 function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
@@ -50,7 +51,8 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
   const now = Date.now();
   const startMs = new Date(first.timestamp).getTime();
   const endMs = new Date(last.timestamp).getTime();
-  const durationDays = Math.max(1, Math.ceil((Math.max(endMs, now) - startMs) / (24 * 60 * 60 * 1000)));
+  const durationDaysExact = Math.max(1 / 24, (Math.max(endMs, now) - startMs) / (24 * 60 * 60 * 1000));
+  const durationDays = Number(durationDaysExact.toFixed(6));
 
   let investedBnb = 0;
   let withdrawnBnb = 0;
@@ -73,8 +75,9 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
     externalTransfers += Number(tx.externalTransferCount || 0);
   }
 
-  const startAmount = investedBnb + totalGasBnb;
-  const endAmount = withdrawnBnb;
+  const openingBalanceBnb = Number(sorted[0].balanceBeforeBnb || 0);
+  const startAmount = openingBalanceBnb + investedBnb + totalGasBnb;
+  const endAmount = openingBalanceBnb + withdrawnBnb;
   const profit = endAmount - startAmount;
   const apr = startAmount > 0 && durationDays > 0 ? ((profit / startAmount) * (365 / durationDays) * 100) : 0;
 
@@ -88,12 +91,13 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
     endAmount: Number(endAmount.toFixed(8)),
     investedBnb: Number(investedBnb.toFixed(8)),
     withdrawnBnb: Number(withdrawnBnb.toFixed(8)),
+    openingBalanceBnb: Number(openingBalanceBnb.toFixed(8)),
     gasSpentBnb: Number(totalGasBnb.toFixed(8)),
     transferCount,
     internalTransfers,
     externalTransfers,
     uniqueTransactions: sorted.length,
-    notes: 'Auto-derived from aggregated wallet cashflows including recurring internal/external LP transfers and gas.',
+    notes: 'Auto-derived from wallet cashflows + token symbol hints. LP token metadata (range/price bands) requires PancakeSwap position endpoints.',
     profit: Number(profit.toFixed(8)),
     realApr: Number(apr.toFixed(8))
   };
@@ -248,6 +252,12 @@ const server = http.createServer(async (req, res) => {
           note: 'Auto-imported. Verify LP operation type manually.'
         };
       });
+      parsed.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+      let runningBalance = 0;
+      for (const row of parsed) {
+        row.balanceBeforeBnb = Number(runningBalance.toFixed(8));
+        runningBalance += row.direction === 'in' ? row.valueBnb : -row.valueBnb - row.gasFeeBnb;
+      }
 
       const data = readData();
       const existingKeys = new Set((data.cashflows || []).map(x => `${x.txHash}:${x.direction || 'unknown'}`));
