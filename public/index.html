@@ -23,12 +23,11 @@
   <h3>Импорт транзакций (BSC)</h3>
   <input id="wallet" placeholder="0x... MetaMask address" />
   <button onclick="scrape()">Скрапить транзакции</button>
-  <p class="small">Показывает переводные cashflow-события; типы операций можно доразметить вручную.</p>
   <table id="cashflowsTable"></table>
 
 <script>
 const columns = [
-  'date','startAmount','startPrice','rangeFrom','rangeTo','coin','chain','endAmount','endDate','durationDays','notes'
+  'date','startAmount','startPrice','rangeFrom','rangeTo','coin','chain','endAmount','endDate','durationDays'
 ];
 
 async function load() {
@@ -39,11 +38,11 @@ async function load() {
 }
 
 function renderPositions(rows) {
-  const head = [...columns, 'profit', 'realApr', 'actions'];
+  const head = [...columns, 'profit', 'realApr'];
   const html = [`<tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr>`];
   if (rows.length) {
     for (const row of rows) {
-      html.push(`<tr>${columns.map(c=>`<td>${row[c] ?? ''}</td>`).join('')}<td>${row.profit}</td><td>${row.realApr}</td><td></td></tr>`);
+      html.push(`<tr>${columns.map(c=>`<td>${row[c] ?? ''}</td>`).join('')}<td>${row.profit}</td><td>${row.realApr}</td></tr>`);
     }
   } else {
     html.push(`<tr><td colspan="14">Позиция не найдена.</td></tr>`);
@@ -52,7 +51,7 @@ function renderPositions(rows) {
 }
 
 function renderCashflows(rows) {
-  const cols = ['timestamp','txHash','valueBnb','action','from','to','note'];
+  const cols = ['timestamp','txHash','valueBnb','from','to'];
   const html = [`<tr>${cols.map(c=>`<th>${c}</th>`).join('')}</tr>`];
   for (const r of rows) {
     html.push(`<tr>${cols.map(c=>`<td>${r[c] ?? ''}</td>`).join('')}</tr>`);
