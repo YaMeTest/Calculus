@@ -65,8 +65,16 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/api/scrape' && req.method === 'POST') {
     const { address } = await readBody(req);
     if (!address) return sendJson(res, 400, { error: 'address is required' });
-    const key = process.env.BSCSCAN_API_KEY || '';
-    const api = `https://api.bscscan.com/api?module=account&action=txlist&address=${address}&sort=desc${key ? `&apikey=${key}` : ''}`;
+    const key = process.env.BSCSCAN_API_KEY || process.env.ETHERSCAN_API_KEY || '';
+    const params = new URLSearchParams({
+      chainid: '56',
+      module: 'account',
+      action: 'txlist',
+      address,
+      sort: 'desc'
+    });
+    if (key) params.set('apikey', key);
+    const api = `https://api.etherscan.io/v2/api?${params.toString()}`;
     try {
       const response = await fetch(api);
       const json = await response.json();
@@ -75,9 +83,13 @@ const server = http.createServer(async (req, res) => {
       }
 
       if (!Array.isArray(json.result)) {
+        const details = json.result || json.message || 'unknown error';
+        const deprecatedV1 = typeof details === 'string' && details.toUpperCase().includes('NOTOK');
         return sendJson(res, 502, {
-          error: 'bscscan returned unexpected payload',
-          details: json.message || json.result || 'unknown error'
+          error: deprecatedV1
+            ? 'bscscan v1 endpoint is deprecated; switched to Etherscan V2 API (chainid=56). Set a valid API key.'
+            : 'bscscan returned unexpected payload',
+          details
         });
       }
 
