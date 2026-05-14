@@ -65,7 +65,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/api/scrape' && req.method === 'POST') {
     const { address } = await readBody(req);
     if (!address) return sendJson(res, 400, { error: 'address is required' });
-    const key = process.env.BSCSCAN_API_KEY || process.env.ETHERSCAN_API_KEY || '';
+    const key = process.env.ROUTESCAN_API_KEY || process.env.BSCSCAN_API_KEY || process.env.ETHERSCAN_API_KEY || '';
     const params = new URLSearchParams({
       chainid: '56',
       module: 'account',
@@ -74,12 +74,12 @@ const server = http.createServer(async (req, res) => {
       sort: 'desc'
     });
     if (key) params.set('apikey', key);
-    const api = `https://api.etherscan.io/v2/api?${params.toString()}`;
+    const api = `https://api.routescan.io/v2/network/mainnet/evm/56/etherscan/api?${params.toString()}`;
     try {
       const response = await fetch(api);
       const json = await response.json();
       if (!response.ok) {
-        return sendJson(res, 502, { error: 'bscscan request failed', status: response.status });
+        return sendJson(res, 502, { error: 'routescan request failed', status: response.status });
       }
 
       if (!Array.isArray(json.result)) {
@@ -87,8 +87,8 @@ const server = http.createServer(async (req, res) => {
         const deprecatedV1 = typeof details === 'string' && details.toUpperCase().includes('NOTOK');
         return sendJson(res, 502, {
           error: deprecatedV1
-            ? 'bscscan v1 endpoint is deprecated; switched to Etherscan V2 API (chainid=56). Set a valid API key.'
-            : 'bscscan returned unexpected payload',
+            ? 'RouteScan returned an error payload. Set a valid ROUTESCAN_API_KEY if required.'
+            : 'routescan returned unexpected payload',
           details
         });
       }
