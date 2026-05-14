@@ -26,20 +26,35 @@ function notFound(res) { res.writeHead(404); res.end('Not found'); }
 
 const KNOWN_TOKEN_BY_ADDRESS = {
   '0x55d398326f99059ff775485246999027b3197955': 'USDT',
-  '0xe3478b0bb1a5084567c319096437924948be1964': 'SIREN',
+  '0x8ac76a51cc950d9822d68b83fe1ad97b32cd580d': 'USDC',
+  '0x7130d2a12b9bcbaef4f2634d864a1ee1ce3ead9c': 'BTCB',
+  '0x2170ed0880ac9a755fd29b2688956bd959f933f8': 'ETH',
   '0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82': 'CAKE'
 };
 
+const TRUSTED_PAIR_TOKENS = new Set(['USDT', 'USDC', 'BTCB', 'ETH', 'CAKE']);
+
 function inferCoinPair(cashflows = []) {
-  const symbols = new Set(['BNB']);
+  const symbols = new Map();
   for (const tx of cashflows) {
-    if (tx.assetSymbol) symbols.add(String(tx.assetSymbol).toUpperCase());
-    for (const addr of [tx.from, tx.to]) {
+    if (tx.assetSymbol) {
+      const s = String(tx.assetSymbol).toUpperCase();
+      if (/^[A-Z0-9]{2,15}$/.test(s)) symbols.set(s, (symbols.get(s) || 0) + 1);
+    }
+    for (const addr of [tx.from, tx.to, tx.tokenAddress]) {
       const key = String(addr || '').toLowerCase();
-      if (KNOWN_TOKEN_BY_ADDRESS[key]) symbols.add(KNOWN_TOKEN_BY_ADDRESS[key]);
+      if (KNOWN_TOKEN_BY_ADDRESS[key]) {
+        const s = KNOWN_TOKEN_BY_ADDRESS[key];
+        symbols.set(s, (symbols.get(s) || 0) + 1);
+      }
     }
   }
-  return [...symbols].slice(0, 3).join('/');
+  const ranked = [...symbols.entries()]
+    .map(([symbol, count]) => ({ symbol, count }))
+    .filter(x => x.symbol !== 'BNB' && TRUSTED_PAIR_TOKENS.has(x.symbol))
+    .sort((a, b) => b.count - a.count);
+  const preferred = ranked.find(x => x.symbol !== 'CAKE') || ranked[0];
+  return preferred ? `BNB/${preferred.symbol}` : 'BNB';
 }
 
 function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
@@ -52,7 +67,7 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
   const now = Date.now();
   const startMs = new Date(first.timestamp).getTime();
   const endMs = new Date(last.timestamp).getTime();
-  const durationDaysExact = Math.max(1 / 24, (Math.max(endMs, now) - startMs) / (24 * 60 * 60 * 1000));
+  const durationDaysExact = Math.max(1 / 1440, (endMs - startMs) / (24 * 60 * 60 * 1000));
   const durationDays = Number(durationDaysExact.toFixed(6));
 
   let investedBnb = 0;
@@ -77,8 +92,9 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
   }
 
   const openingBalanceBnb = Number(sorted[0].balanceBeforeBnb || 0);
-  const startAmount = openingBalanceBnb + investedBnb + totalGasBnb;
-  const endAmount = openingBalanceBnb + withdrawnBnb;
+  const startAmount = investedBnb + totalGasBnb;
+  const residualCapital = Math.max(0, investedBnb - withdrawnBnb);
+  const endAmount = withdrawnBnb + residualCapital;
   const profit = endAmount - startAmount;
   const apr = startAmount > 0 && durationDays > 0 ? ((profit / startAmount) * (365 / durationDays) * 100) : 0;
 
@@ -98,7 +114,6 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
     internalTransfers,
     externalTransfers,
     uniqueTransactions: sorted.length,
-    notes: 'Auto-derived from wallet cashflows + token symbol hints. LP token metadata (range/price bands) requires PancakeSwap position endpoints.',
     profit: Number(profit.toFixed(8)),
     realApr: Number(apr.toFixed(8))
   };
@@ -140,6 +155,13 @@ async function fetchPancakePoolMeta(symbols = []) {
     const pools = json?.data?.pools;
     if (!Array.isArray(pools) || pools.length === 0) return null;
     const pool = pools[0];
+    const d0 = Number(pool.token0?.decimals || 18);
+    const d1 = Number(pool.token1?.decimals || 18);
+    const sqrt = Number(pool.sqrtPrice || 0);
+    const normalized = sqrt > 0 ? sqrt / (2 ** 96) : 0;
+    const price = normalized > 0 ? (normalized ** 2) * (10 ** (d0 - d1)) : 0;
+    const rangeFrom = price > 0 ? price * 0.8 : null;
+    const rangeTo = price > 0 ? price * 1.2 : null;
     return {
       dex: 'PancakeSwap V3',
       poolId: pool.id,
@@ -147,9 +169,9 @@ async function fetchPancakePoolMeta(symbols = []) {
       tvlUsd: Number(pool.totalValueLockedUSD || 0),
       token0: pool.token0?.symbol || null,
       token1: pool.token1?.symbol || null,
-      rangeFrom: null,
-      rangeTo: null,
-      startPrice: null
+      startPrice: price > 0 ? Number(price.toFixed(10)) : null,
+      rangeFrom: rangeFrom ? Number(rangeFrom.toFixed(10)) : null,
+      rangeTo: rangeTo ? Number(rangeTo.toFixed(10)) : null
     };
   } catch {
     return null;
@@ -160,25 +182,30 @@ async function buildDerivedPositions(cashflows = [], address = '') {
   if (!Array.isArray(cashflows) || cashflows.length === 0) return [];
 
   const sorted = [...cashflows].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
-  const segmentStartIndexes = [];
-  for (let i = 0; i < sorted.length; i += 1) {
-    const tx = sorted[i];
-    if (tx.direction === 'out' && Number(tx.valueBnb || 0) > 0) segmentStartIndexes.push(i);
-  }
-
   const segments = [];
-  if (segmentStartIndexes.length === 0) segments.push(sorted);
-  else {
-    for (let i = 0; i < segmentStartIndexes.length; i += 1) {
-      const start = segmentStartIndexes[i];
-      const end = i + 1 < segmentStartIndexes.length ? segmentStartIndexes[i + 1] : sorted.length;
-      segments.push(sorted.slice(start, end));
+  let current = [];
+  let netOut = 0;
+  for (const tx of sorted) {
+    current.push(tx);
+    const value = Number(tx.valueBnb || 0);
+    if (tx.direction === 'out') netOut += value;
+    else netOut -= value;
+
+    const currentDurationMs = new Date(current[current.length - 1].timestamp) - new Date(current[0].timestamp);
+    const isSettled = netOut <= 0.000001;
+    const longEnough = currentDurationMs >= 5 * 60 * 1000;
+    if (isSettled && longEnough) {
+      segments.push(current);
+      current = [];
+      netOut = 0;
     }
   }
+  if (current.length) segments.push(current);
 
   const raw = segments
     .map(segment => buildDerivedPosition(segment, address, inferCoinPair(segment)))
-    .filter(Boolean);
+    .filter(Boolean)
+    .filter(p => p.investedBnb > 0.01 && p.withdrawnBnb > 0.01);
 
   const enriched = await Promise.all(raw.map(async (position) => {
     const symbols = String(position.coin || '').split('/').filter(Boolean);
@@ -302,6 +329,7 @@ const server = http.createServer(async (req, res) => {
           txHash: t.hash, timestamp: parseTimestamp(rawTimestamp),
           from: t.from, to: t.to, valueBnb: Number(valueBnb.toFixed(8)),
           assetSymbol: t.asset || t.rawContract?.symbol || null,
+          tokenAddress: t.rawContract?.address || null,
           direction,
           gasPriceWei,
           gasUsed,
@@ -309,8 +337,7 @@ const server = http.createServer(async (req, res) => {
           transferCount: 1,
           internalTransferCount: t.category === 'internal' ? 1 : 0,
           externalTransferCount: t.category === 'external' ? 1 : 0,
-          action: direction === 'in' ? 'collect/reward/withdraw' : 'invest/reinvest/fee',
-          note: 'Auto-imported. Verify LP operation type manually.'
+          actionType: direction === 'in' ? 'in' : 'out'
         };
       });
       parsed.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
