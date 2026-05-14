@@ -23,7 +23,24 @@ function calcMetrics(position) {
 function sendJson(res, code, obj) { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); }
 function notFound(res) { res.writeHead(404); res.end('Not found'); }
 
-function buildDerivedPosition(cashflows = [], address = '') {
+const KNOWN_TOKEN_BY_ADDRESS = {
+  '0x55d398326f99059ff775485246999027b3197955': 'USDT',
+  '0xe3478b0bb1a5084567c319096437924948be1964': 'SIREN',
+  '0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82': 'CAKE'
+};
+
+function inferCoinPair(cashflows = []) {
+  const symbols = new Set(['BNB']);
+  for (const tx of cashflows) {
+    for (const addr of [tx.from, tx.to]) {
+      const key = String(addr || '').toLowerCase();
+      if (KNOWN_TOKEN_BY_ADDRESS[key]) symbols.add(KNOWN_TOKEN_BY_ADDRESS[key]);
+    }
+  }
+  return [...symbols].join('');
+}
+
+function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
   if (!Array.isArray(cashflows) || cashflows.length === 0) return null;
 
   const normalizedAddress = String(address || '').toLowerCase();
@@ -65,7 +82,7 @@ function buildDerivedPosition(cashflows = [], address = '') {
     date: first.timestamp,
     endDate: last.timestamp,
     durationDays,
-    coin: 'BNB',
+    coin: coinPair,
     chain: 'BSC',
     startAmount: Number(startAmount.toFixed(8)),
     endAmount: Number(endAmount.toFixed(8)),
@@ -80,6 +97,32 @@ function buildDerivedPosition(cashflows = [], address = '') {
     profit: Number(profit.toFixed(8)),
     realApr: Number(apr.toFixed(8))
   };
+}
+
+function buildDerivedPositions(cashflows = [], address = '') {
+  if (!Array.isArray(cashflows) || cashflows.length === 0) return [];
+
+  const sorted = [...cashflows].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  const segmentStartIndexes = [];
+  for (let i = 0; i < sorted.length; i += 1) {
+    const tx = sorted[i];
+    if (tx.direction === 'out' && Number(tx.valueBnb || 0) > 0) segmentStartIndexes.push(i);
+  }
+
+  const segments = [];
+  if (segmentStartIndexes.length === 0) segments.push(sorted);
+  else {
+    for (let i = 0; i < segmentStartIndexes.length; i += 1) {
+      const start = segmentStartIndexes[i];
+      const end = i + 1 < segmentStartIndexes.length ? segmentStartIndexes[i + 1] : sorted.length;
+      segments.push(sorted.slice(start, end));
+    }
+  }
+
+  return segments
+    .map(segment => buildDerivedPosition(segment, address, inferCoinPair(segment)))
+    .filter(Boolean)
+    .sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
 function serveStatic(res, pathname) {
@@ -110,8 +153,8 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/api/positions' && req.method === 'GET') {
     const data = readData();
     const manual = (data.positions || []).map(calcMetrics);
-    const derived = buildDerivedPosition(data.cashflows || [], data.lastScrapedAddress || '');
-    return sendJson(res, 200, derived ? [derived, ...manual] : manual);
+    const derived = buildDerivedPositions(data.cashflows || [], data.lastScrapedAddress || '');
+    return sendJson(res, 200, [...derived, ...manual]);
   }
   else if (pathname === '/api/cashflows' && req.method === 'GET') return sendJson(res, 200, readData().cashflows || []);
   else if (pathname === '/api/scrape' && req.method === 'POST') {
@@ -227,6 +270,7 @@ const server = http.createServer(async (req, res) => {
       
       data.cashflows = [...(data.cashflows || []), ...unique];
       data.lastScrapedAddress = address;
+      data.positions = buildDerivedPositions(data.cashflows, address);
       writeData(data);
 
       return sendJson(res, 200, { imported: unique.length, totalParsed: parsed.length, cashflows: data.cashflows });
