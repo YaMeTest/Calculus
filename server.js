@@ -235,7 +235,7 @@ const server = http.createServer(async (req, res) => {
         method: 'nr_getAssetTransfers',
         params: [{
           [direction === 'in' ? 'toAddress' : 'fromAddress']: address,
-          category: ['external', 'internal', 'erc20'],
+          category: ['external', 'internal', '20'],
           withMetadata: true,
           excludeZeroValue: false,
           maxCount: '0x12c',
