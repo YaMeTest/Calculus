@@ -26,6 +26,8 @@
   <h3>Импорт транзакций (BSC)</h3>
   <input id="wallet" placeholder="0x... MetaMask address" />
   <button onclick="scrape()">Скрапить транзакции</button>
+  <button onclick="toggleSync()" id="syncBtn">Включить синхронизацию</button>
+  <p class="small" id="syncStatus">Синхронизация выключена.</p>
   <p class="small">Показывает переводные cashflow-события; типы операций можно доразметить вручную.</p>
   <table id="cashflowsTable"></table>
 
@@ -36,6 +38,8 @@ const columns = [
 
 const form = document.getElementById('form');
 form.innerHTML = columns.map(c => `<div><label>${c}</label><input id="${c}" /></div>`).join('');
+
+let syncTimer = null;
 
 async function load() {
   const positions = await fetch('/api/positions').then(r=>r.json());
@@ -78,6 +82,27 @@ async function scrape() {
   const out = await fetch('/api/scrape', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address})}).then(r=>r.json());
   alert(`Импортировано: ${out.imported ?? 0}`);
   load();
+}
+
+function toggleSync() {
+  if (syncTimer) {
+    clearInterval(syncTimer);
+    syncTimer = null;
+    document.getElementById('syncBtn').textContent = 'Включить синхронизацию';
+    document.getElementById('syncStatus').textContent = 'Синхронизация выключена.';
+    return;
+  }
+
+  const address = document.getElementById('wallet').value.trim();
+  if (!address) {
+    alert('Введите адрес кошелька перед запуском синхронизации.');
+    return;
+  }
+
+  scrape();
+  syncTimer = setInterval(scrape, 5 * 60 * 1000);
+  document.getElementById('syncBtn').textContent = 'Остановить синхронизацию';
+  document.getElementById('syncStatus').textContent = 'Синхронизация включена: скрапинг каждые 5 минут.';
 }
 
 load();

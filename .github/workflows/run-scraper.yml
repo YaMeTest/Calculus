@@ -1,0 +1,49 @@
+name: Run BSC Scraper
+
+on:
+  workflow_dispatch:
+    inputs:
+      wallet_address:
+        description: 'Wallet address to scrape (0x...)'
+        required: true
+        type: string
+
+jobs:
+  scrape:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Run scraper endpoint
+        env:
+          PORT: 3000
+          BSCSCAN_API_KEY: ${{ secrets.BSCSCAN_API_KEY }}
+          WALLET_ADDRESS: ${{ inputs.wallet_address }}
+        run: |
+          node server.js &
+          SERVER_PID=$!
+          trap "kill $SERVER_PID" EXIT
+          sleep 2
+          curl -sS -X POST http://127.0.0.1:${PORT}/api/scrape \
+            -H 'Content-Type: application/json' \
+            -d "{\"address\":\"${WALLET_ADDRESS}\"}" | tee /tmp/scrape-output.json
+
+      - name: Commit updated data
+        run: |
+          if git diff --quiet data/positions.json; then
+            echo "No data changes to commit"
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add data/positions.json
+          git commit -m "chore: sync scraped cashflows"
+          git push
