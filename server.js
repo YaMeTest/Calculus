@@ -31,10 +31,11 @@ const KNOWN_TOKEN_BY_ADDRESS = {
   '0x2170ed0880ac9a755fd29b2688956bd959f933f8': 'ETH',
   '0x7130d2a12b9bcbaef4f2634d864a1ee1ce3ead9c': 'BTCB',
   '0x0e09fabb73bd3ade0a17ecc321fd13a19e81ce82': 'CAKE',
-  '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c': 'WBNB'
+  '0xbb4cdb9cbd36b01bd1cbaebf2de08d9173bc095c': 'WBNB',
+  '0xe3478b0bb1a5084567c319096437924948be1964': 'SIREN'
 };
 
-const ALLOWED_PAIR_TOKENS = new Set(['USDT', 'USDC', 'BUSD', 'ETH', 'BTCB', 'CAKE']);
+const ALLOWED_PAIR_TOKENS = new Set(['USDT', 'USDC', 'BUSD', 'ETH', 'BTCB', 'CAKE', 'WBNB', 'SIREN']);
 
 function inferCoinPair(cashflows = []) {
   const symbols = new Map();
