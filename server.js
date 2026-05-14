@@ -12,6 +12,7 @@ function ensureDataFile() {
 
 function readData() { ensureDataFile(); return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8')); }
 function writeData(d) { fs.writeFileSync(DATA_FILE, JSON.stringify(d, null, 2)); }
+const PANCAKE_V3_SUBGRAPH = 'https://api.thegraph.com/subgraphs/name/pancakeswap/exchange-v3-bsc';
 
 function calcMetrics(position) {
   const start = Number(position.startAmount || 0), end = Number(position.endAmount || 0), days = Number(position.durationDays || 0);
@@ -32,12 +33,13 @@ const KNOWN_TOKEN_BY_ADDRESS = {
 function inferCoinPair(cashflows = []) {
   const symbols = new Set(['BNB']);
   for (const tx of cashflows) {
+    if (tx.assetSymbol) symbols.add(String(tx.assetSymbol).toUpperCase());
     for (const addr of [tx.from, tx.to]) {
       const key = String(addr || '').toLowerCase();
       if (KNOWN_TOKEN_BY_ADDRESS[key]) symbols.add(KNOWN_TOKEN_BY_ADDRESS[key]);
     }
   }
-  return [...symbols].join('');
+  return [...symbols].slice(0, 3).join('/');
 }
 
 function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
@@ -50,7 +52,8 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
   const now = Date.now();
   const startMs = new Date(first.timestamp).getTime();
   const endMs = new Date(last.timestamp).getTime();
-  const durationDays = Math.max(1, Math.ceil((Math.max(endMs, now) - startMs) / (24 * 60 * 60 * 1000)));
+  const durationDaysExact = Math.max(1 / 24, (Math.max(endMs, now) - startMs) / (24 * 60 * 60 * 1000));
+  const durationDays = Number(durationDaysExact.toFixed(6));
 
   let investedBnb = 0;
   let withdrawnBnb = 0;
@@ -73,8 +76,9 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
     externalTransfers += Number(tx.externalTransferCount || 0);
   }
 
-  const startAmount = investedBnb + totalGasBnb;
-  const endAmount = withdrawnBnb;
+  const openingBalanceBnb = Number(sorted[0].balanceBeforeBnb || 0);
+  const startAmount = openingBalanceBnb + investedBnb + totalGasBnb;
+  const endAmount = openingBalanceBnb + withdrawnBnb;
   const profit = endAmount - startAmount;
   const apr = startAmount > 0 && durationDays > 0 ? ((profit / startAmount) * (365 / durationDays) * 100) : 0;
 
@@ -88,18 +92,71 @@ function buildDerivedPosition(cashflows = [], address = '', coinPair = 'BNB') {
     endAmount: Number(endAmount.toFixed(8)),
     investedBnb: Number(investedBnb.toFixed(8)),
     withdrawnBnb: Number(withdrawnBnb.toFixed(8)),
+    openingBalanceBnb: Number(openingBalanceBnb.toFixed(8)),
     gasSpentBnb: Number(totalGasBnb.toFixed(8)),
     transferCount,
     internalTransfers,
     externalTransfers,
     uniqueTransactions: sorted.length,
-    notes: 'Auto-derived from aggregated wallet cashflows including recurring internal/external LP transfers and gas.',
+    notes: 'Auto-derived from wallet cashflows + token symbol hints. LP token metadata (range/price bands) requires PancakeSwap position endpoints.',
     profit: Number(profit.toFixed(8)),
     realApr: Number(apr.toFixed(8))
   };
 }
 
-function buildDerivedPositions(cashflows = [], address = '') {
+async function fetchPancakePoolMeta(symbols = []) {
+  if (!Array.isArray(symbols) || symbols.length < 2) return null;
+  const [a, b] = symbols.map(x => String(x || '').toUpperCase());
+  if (!a || !b) return null;
+
+  const query = `
+    query Pools($a: String!, $b: String!) {
+      pools(
+        first: 5,
+        orderBy: totalValueLockedUSD,
+        orderDirection: desc,
+        where: {
+          token0_: {symbol_in: [$a, $b]},
+          token1_: {symbol_in: [$a, $b]}
+        }
+      ) {
+        id
+        feeTier
+        sqrtPrice
+        token0 { symbol decimals }
+        token1 { symbol decimals }
+        totalValueLockedUSD
+      }
+    }
+  `;
+
+  try {
+    const response = await fetch(PANCAKE_V3_SUBGRAPH, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ query, variables: { a, b } })
+    });
+    const json = await response.json();
+    const pools = json?.data?.pools;
+    if (!Array.isArray(pools) || pools.length === 0) return null;
+    const pool = pools[0];
+    return {
+      dex: 'PancakeSwap V3',
+      poolId: pool.id,
+      feeTier: Number(pool.feeTier || 0),
+      tvlUsd: Number(pool.totalValueLockedUSD || 0),
+      token0: pool.token0?.symbol || null,
+      token1: pool.token1?.symbol || null,
+      rangeFrom: null,
+      rangeTo: null,
+      startPrice: null
+    };
+  } catch {
+    return null;
+  }
+}
+
+async function buildDerivedPositions(cashflows = [], address = '') {
   if (!Array.isArray(cashflows) || cashflows.length === 0) return [];
 
   const sorted = [...cashflows].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
@@ -119,10 +176,17 @@ function buildDerivedPositions(cashflows = [], address = '') {
     }
   }
 
-  return segments
+  const raw = segments
     .map(segment => buildDerivedPosition(segment, address, inferCoinPair(segment)))
-    .filter(Boolean)
-    .sort((a, b) => new Date(b.date) - new Date(a.date));
+    .filter(Boolean);
+
+  const enriched = await Promise.all(raw.map(async (position) => {
+    const symbols = String(position.coin || '').split('/').filter(Boolean);
+    const meta = await fetchPancakePoolMeta(symbols.slice(0, 2));
+    return meta ? { ...position, ...meta } : position;
+  }));
+
+  return enriched.sort((a, b) => new Date(b.date) - new Date(a.date));
 }
 
 function serveStatic(res, pathname) {
@@ -153,7 +217,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === '/api/positions' && req.method === 'GET') {
     const data = readData();
     const manual = (data.positions || []).map(calcMetrics);
-    const derived = buildDerivedPositions(data.cashflows || [], data.lastScrapedAddress || '');
+    const derived = await buildDerivedPositions(data.cashflows || [], data.lastScrapedAddress || '');
     return sendJson(res, 200, [...derived, ...manual]);
   }
   else if (pathname === '/api/cashflows' && req.method === 'GET') return sendJson(res, 200, readData().cashflows || []);
@@ -171,7 +235,7 @@ const server = http.createServer(async (req, res) => {
         method: 'nr_getAssetTransfers',
         params: [{
           [direction === 'in' ? 'toAddress' : 'fromAddress']: address,
-          category: ['external', 'internal'],
+          category: ['external', 'internal', 'erc20'],
           withMetadata: true,
           excludeZeroValue: false,
           maxCount: '0x12c',
@@ -237,6 +301,7 @@ const server = http.createServer(async (req, res) => {
         return {
           txHash: t.hash, timestamp: parseTimestamp(rawTimestamp),
           from: t.from, to: t.to, valueBnb: Number(valueBnb.toFixed(8)),
+          assetSymbol: t.asset || t.rawContract?.symbol || null,
           direction,
           gasPriceWei,
           gasUsed,
@@ -248,6 +313,12 @@ const server = http.createServer(async (req, res) => {
           note: 'Auto-imported. Verify LP operation type manually.'
         };
       });
+      parsed.sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+      let runningBalance = 0;
+      for (const row of parsed) {
+        row.balanceBeforeBnb = Number(runningBalance.toFixed(8));
+        runningBalance += row.direction === 'in' ? row.valueBnb : -row.valueBnb - row.gasFeeBnb;
+      }
 
       const data = readData();
       const existingKeys = new Set((data.cashflows || []).map(x => `${x.txHash}:${x.direction || 'unknown'}`));
@@ -270,7 +341,7 @@ const server = http.createServer(async (req, res) => {
       
       data.cashflows = [...(data.cashflows || []), ...unique];
       data.lastScrapedAddress = address;
-      data.positions = buildDerivedPositions(data.cashflows, address);
+      data.positions = await buildDerivedPositions(data.cashflows, address);
       writeData(data);
 
       return sendJson(res, 200, { imported: unique.length, totalParsed: parsed.length, cashflows: data.cashflows });
