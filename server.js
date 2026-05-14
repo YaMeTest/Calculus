@@ -23,6 +23,65 @@ function calcMetrics(position) {
 function sendJson(res, code, obj) { res.writeHead(code, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); }
 function notFound(res) { res.writeHead(404); res.end('Not found'); }
 
+function buildDerivedPosition(cashflows = [], address = '') {
+  if (!Array.isArray(cashflows) || cashflows.length === 0) return null;
+
+  const normalizedAddress = String(address || '').toLowerCase();
+  const sorted = [...cashflows].sort((a, b) => new Date(a.timestamp) - new Date(b.timestamp));
+  const first = sorted[0];
+  const last = sorted[sorted.length - 1];
+  const now = Date.now();
+  const startMs = new Date(first.timestamp).getTime();
+  const endMs = new Date(last.timestamp).getTime();
+  const durationDays = Math.max(1, Math.ceil((Math.max(endMs, now) - startMs) / (24 * 60 * 60 * 1000)));
+
+  let investedBnb = 0;
+  let withdrawnBnb = 0;
+  let totalGasBnb = 0;
+  let transferCount = 0;
+  let internalTransfers = 0;
+  let externalTransfers = 0;
+
+  for (const tx of sorted) {
+    const value = Number(tx.valueBnb || 0);
+    const gas = Number(tx.gasFeeBnb || 0);
+    const direction = tx.direction || (tx.to?.toLowerCase() === normalizedAddress ? 'in' : 'out');
+
+    if (direction === 'out') investedBnb += value;
+    else withdrawnBnb += value;
+
+    totalGasBnb += gas;
+    transferCount += Number(tx.transferCount || 1);
+    internalTransfers += Number(tx.internalTransferCount || 0);
+    externalTransfers += Number(tx.externalTransferCount || 0);
+  }
+
+  const startAmount = investedBnb + totalGasBnb;
+  const endAmount = withdrawnBnb;
+  const profit = endAmount - startAmount;
+  const apr = startAmount > 0 && durationDays > 0 ? ((profit / startAmount) * (365 / durationDays) * 100) : 0;
+
+  return {
+    date: first.timestamp,
+    endDate: last.timestamp,
+    durationDays,
+    coin: 'BNB',
+    chain: 'BSC',
+    startAmount: Number(startAmount.toFixed(8)),
+    endAmount: Number(endAmount.toFixed(8)),
+    investedBnb: Number(investedBnb.toFixed(8)),
+    withdrawnBnb: Number(withdrawnBnb.toFixed(8)),
+    gasSpentBnb: Number(totalGasBnb.toFixed(8)),
+    transferCount,
+    internalTransfers,
+    externalTransfers,
+    uniqueTransactions: sorted.length,
+    notes: 'Auto-derived from aggregated wallet cashflows including recurring internal/external LP transfers and gas.',
+    profit: Number(profit.toFixed(8)),
+    realApr: Number(apr.toFixed(8))
+  };
+}
+
 function serveStatic(res, pathname) {
   const file = pathname === '/' ? '/index.html' : pathname;
   const full = path.join(process.cwd(), 'public', file);
@@ -48,7 +107,12 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const { pathname } = url;
 
-  if (pathname === '/api/positions' && req.method === 'GET') return sendJson(res, 200, readData().positions.map(calcMetrics));
+  if (pathname === '/api/positions' && req.method === 'GET') {
+    const data = readData();
+    const manual = (data.positions || []).map(calcMetrics);
+    const derived = buildDerivedPosition(data.cashflows || [], data.lastScrapedAddress || '');
+    return sendJson(res, 200, derived ? [derived, ...manual] : manual);
+  }
   else if (pathname === '/api/cashflows' && req.method === 'GET') return sendJson(res, 200, readData().cashflows || []);
   else if (pathname === '/api/scrape' && req.method === 'POST') {
 
@@ -122,20 +186,47 @@ const server = http.createServer(async (req, res) => {
       const parsed = txs.filter(t => t && t.hash).map(t => {
         const valueBnb = Number(t.value || 0) / 1e18;
         const direction = t.to?.toLowerCase() === address.toLowerCase() ? 'in' : 'out';
+        const gasUsed = Number(t.gasUsed || t.receipt?.gasUsed || 0);
+        const gasPriceWei = Number(t.gasPrice || t.effectiveGasPrice || 0);
+        const gasFeeBnb = gasUsed > 0 && gasPriceWei > 0 ? (gasUsed * gasPriceWei) / 1e18 : 0;
+        const rawTimestamp = t.blockTimeStamp || t.metadata?.blockTimestamp || t.timeStamp || t.blockTimestamp;
 
         return {
-          txHash: t.hash, timestamp: parseTimestamp(t.metadata?.blockTimestamp || t.timeStamp || t.blockTimestamp),
+          txHash: t.hash, timestamp: parseTimestamp(rawTimestamp),
           from: t.from, to: t.to, valueBnb: Number(valueBnb.toFixed(8)),
+          direction,
+          gasPriceWei,
+          gasUsed,
+          gasFeeBnb: Number(gasFeeBnb.toFixed(8)),
+          transferCount: 1,
+          internalTransferCount: t.category === 'internal' ? 1 : 0,
+          externalTransferCount: t.category === 'external' ? 1 : 0,
           action: direction === 'in' ? 'collect/reward/withdraw' : 'invest/reinvest/fee',
           note: 'Auto-imported. Verify LP operation type manually.'
         };
       });
 
       const data = readData();
-      const seen = new Set((data.cashflows || []).map(x => x.txHash));
-      const unique = parsed.filter((x, idx, arr) => !seen.has(x.txHash) && arr.findIndex(y => y.txHash === x.txHash) === idx);
+      const existingKeys = new Set((data.cashflows || []).map(x => `${x.txHash}:${x.direction || 'unknown'}`));
+      const incomingByHash = new Map();
+      for (const row of parsed) {
+        const key = `${row.txHash}:${row.direction}`;
+        const current = incomingByHash.get(key);
+        if (!current) incomingByHash.set(key, { ...row });
+        else {
+          current.valueBnb = Number((current.valueBnb + row.valueBnb).toFixed(8));
+          current.gasFeeBnb = Number((current.gasFeeBnb + row.gasFeeBnb).toFixed(8));
+          current.transferCount += row.transferCount;
+          current.internalTransferCount += row.internalTransferCount;
+          current.externalTransferCount += row.externalTransferCount;
+          if (new Date(row.timestamp) < new Date(current.timestamp)) current.timestamp = row.timestamp;
+        }
+      }
+
+      const unique = [...incomingByHash.values()].filter(x => !existingKeys.has(`${x.txHash}:${x.direction}`));
       
       data.cashflows = [...(data.cashflows || []), ...unique];
+      data.lastScrapedAddress = address;
       writeData(data);
 
       return sendJson(res, 200, { imported: unique.length, totalParsed: parsed.length, cashflows: data.cashflows });
