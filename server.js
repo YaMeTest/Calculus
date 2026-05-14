@@ -26,11 +26,15 @@ function notFound(res) { res.writeHead(404); res.end('Not found'); }
 function serveStatic(res, pathname) {
   const file = pathname === '/' ? '/index.html' : pathname;
   const full = path.join(process.cwd(), 'public', file);
+
   if (!full.startsWith(path.join(process.cwd(), 'public')) || !fs.existsSync(full)) return false;
+
   const ext = path.extname(full);
   const type = ext === '.html' ? 'text/html' : 'text/plain';
+
   res.writeHead(200, { 'Content-Type': type });
   res.end(fs.readFileSync(full));
+  
   return true;
 }
 
@@ -44,37 +48,23 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://${req.headers.host}`);
   const { pathname } = url;
 
-  if (pathname === '/api/positions' && req.method === 'GET') {
-    return sendJson(res, 200, readData().positions.map(calcMetrics));
-  }
-  if (pathname === '/api/positions' && req.method === 'POST') {
-    const body = await readBody(req);
-    const data = readData();
-    const row = { id: Date.now().toString(), ...body };
-    data.positions.push(row); writeData(data);
-    return sendJson(res, 201, calcMetrics(row));
-  }
-  if (pathname.startsWith('/api/positions/') && req.method === 'DELETE') {
-    const id = pathname.split('/').pop();
-    const data = readData();
-    data.positions = data.positions.filter(p => p.id !== id); writeData(data);
-    res.writeHead(204); return res.end();
-  }
-  if (pathname === '/api/cashflows' && req.method === 'GET') return sendJson(res, 200, readData().cashflows || []);
+  if (pathname === '/api/positions' && req.method === 'GET') return sendJson(res, 200, readData().positions.map(calcMetrics));
+  else if (pathname === '/api/cashflows' && req.method === 'GET') return sendJson(res, 200, readData().cashflows || []);
+  else if (pathname === '/api/scrape' && req.method === 'POST') {
 
-  if (pathname === '/api/scrape' && req.method === 'POST') {
     const { address } = await readBody(req);
+
     if (!address) return sendJson(res, 400, { error: 'address is required' });
-    const key = process.env.MEGANODE_API_KEY || process.env.BSCTRACE_API_KEY || '';
-    if (!key) return sendJson(res, 400, { error: 'MEGANODE_API_KEY (or BSCTRACE_API_KEY) is required' });
-    const api = `https://bsc-mainnet.nodereal.io/v1/${key}`;
+
+    const api = `https://bsc-mainnet.nodereal.io/v1/0ff69eec2396484fb92903b68c23c026`;
+    
     try {
       const makePayload = (direction, pageKey) => ({
         jsonrpc: '2.0',
         method: 'nr_getAssetTransfers',
         params: [{
           [direction === 'in' ? 'toAddress' : 'fromAddress']: address,
-          category: ['external', 'internal', 'erc20'],
+          category: ['external', 'internal'],
           withMetadata: true,
           excludeZeroValue: false,
           maxCount: '0x12c',
@@ -108,6 +98,7 @@ const server = http.createServer(async (req, res) => {
 
         return { transfers };
       };
+
       const [inResult, outResult] = await Promise.all([loadTransfers('in'), loadTransfers('out')]);
       if (inResult.error || outResult.error) {
         return sendJson(res, 502, {
@@ -122,13 +113,16 @@ const server = http.createServer(async (req, res) => {
       const txs = [...inTransfers, ...outTransfers];
       const parseTimestamp = (value) => {
         if (typeof value === 'string' && value.includes('T')) return new Date(value).toISOString();
+
         const n = Number(value || 0);
         const ms = n > 1e12 ? n : n * 1000;
         return new Date(ms || 0).toISOString();
       };
+
       const parsed = txs.filter(t => t && t.hash).map(t => {
         const valueBnb = Number(t.value || 0) / 1e18;
         const direction = t.to?.toLowerCase() === address.toLowerCase() ? 'in' : 'out';
+
         return {
           txHash: t.hash, timestamp: parseTimestamp(t.metadata?.blockTimestamp || t.timeStamp || t.blockTimestamp),
           from: t.from, to: t.to, valueBnb: Number(valueBnb.toFixed(8)),
@@ -136,10 +130,14 @@ const server = http.createServer(async (req, res) => {
           note: 'Auto-imported. Verify LP operation type manually.'
         };
       });
+
       const data = readData();
       const seen = new Set((data.cashflows || []).map(x => x.txHash));
       const unique = parsed.filter((x, idx, arr) => !seen.has(x.txHash) && arr.findIndex(y => y.txHash === x.txHash) === idx);
-      data.cashflows = [...(data.cashflows || []), ...unique]; writeData(data);
+      
+      data.cashflows = [...(data.cashflows || []), ...unique];
+      writeData(data);
+
       return sendJson(res, 200, { imported: unique.length, totalParsed: parsed.length, cashflows: data.cashflows });
     } catch (e) { return sendJson(res, 500, { error: 'scrape failed', details: String(e) }); }
   }
