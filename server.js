@@ -370,7 +370,9 @@ const server = http.createServer(async (req, res) => {
         const decimals = Number(t.rawContract?.decimal || (t.asset ? 18 : 18));
         const valueRaw = Number(t.value || 0);
         const valueAmount = decimals >= 0 ? valueRaw / (10 ** decimals) : 0;
-        const valueBnb = !t.asset ? valueAmount : 0;
+        const symbol = String(t.asset || t.rawContract?.symbol || '').toUpperCase();
+        const isNativeBnb = !t.asset || symbol === 'BNB' || symbol === 'WBNB';
+        const valueBnb = isNativeBnb ? valueAmount : 0;
         const direction = t.to?.toLowerCase() === address.toLowerCase() ? 'in' : 'out';
         const gasUsed = Number(t.gasUsed || t.receipt?.gasUsed || 0);
         const gasPriceWei = Number(t.gasPrice || t.effectiveGasPrice || 0);
@@ -380,7 +382,7 @@ const server = http.createServer(async (req, res) => {
         return {
           txHash: t.hash, timestamp: parseTimestamp(rawTimestamp),
           from: t.from, to: t.to, valueBnb: Number(valueBnb.toFixed(8)),
-          assetSymbol: (t.asset || t.rawContract?.symbol || null),
+          assetSymbol: symbol || null,
           valueAmount: Number(valueAmount.toFixed(12)),
           tokenDecimals: decimals,
           direction,
@@ -410,6 +412,7 @@ const server = http.createServer(async (req, res) => {
         else {
           current.valueBnb = Number((current.valueBnb + row.valueBnb).toFixed(8));
           current.gasFeeBnb = Number((current.gasFeeBnb + row.gasFeeBnb).toFixed(8));
+          current.valueAmount = Number((current.valueAmount + row.valueAmount).toFixed(12));
           current.transferCount += row.transferCount;
           current.internalTransferCount += row.internalTransferCount;
           current.externalTransferCount += row.externalTransferCount;
