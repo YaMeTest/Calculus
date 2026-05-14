@@ -17,17 +17,12 @@
 <body>
   <h2>Liquid Pool P&L Tracker</h2>
 
-  <div class="row" id="form"></div>
-  <button onclick="savePosition()">Добавить позицию</button>
-
-  <h3>Позиции</h3>
+  <h3>Позиция</h3>
   <table id="positionsTable"></table>
 
   <h3>Импорт транзакций (BSC)</h3>
   <input id="wallet" placeholder="0x... MetaMask address" />
   <button onclick="scrape()">Скрапить транзакции</button>
-  <button onclick="toggleSync()" id="syncBtn">Включить синхронизацию</button>
-  <p class="small" id="syncStatus">Синхронизация выключена.</p>
   <p class="small">Показывает переводные cashflow-события; типы операций можно доразметить вручную.</p>
   <table id="cashflowsTable"></table>
 
@@ -36,23 +31,20 @@ const columns = [
   'date','startAmount','startPrice','rangeFrom','rangeTo','coin','chain','endAmount','endDate','durationDays','notes'
 ];
 
-const form = document.getElementById('form');
-form.innerHTML = columns.map(c => `<div><label>${c}</label><input id="${c}" /></div>`).join('');
-
-let syncTimer = null;
-
 async function load() {
   const positions = await fetch('/api/positions').then(r=>r.json());
-  renderPositions(positions);
+  renderPosition(positions[0] || null);
   const cashflows = await fetch('/api/cashflows').then(r=>r.json());
-  renderCashflows(cashflows.slice(0,100));
+  renderCashflows(cashflows);
 }
 
-function renderPositions(rows) {
+function renderPosition(row) {
   const head = [...columns, 'profit', 'realApr', 'actions'];
   const html = [`<tr>${head.map(h=>`<th>${h}</th>`).join('')}</tr>`];
-  for (const r of rows) {
-    html.push(`<tr>${columns.map(c=>`<td>${r[c] ?? ''}</td>`).join('')}<td>${r.profit}</td><td>${r.realApr}</td><td><button onclick="del('${r.id}')">X</button></td></tr>`);
+  if (row) {
+    html.push(`<tr>${columns.map(c=>`<td>${row[c] ?? ''}</td>`).join('')}<td>${row.profit}</td><td>${row.realApr}</td><td></td></tr>`);
+  } else {
+    html.push(`<tr><td colspan="14">Позиция не найдена.</td></tr>`);
   }
   document.getElementById('positionsTable').innerHTML = html.join('');
 }
@@ -66,43 +58,11 @@ function renderCashflows(rows) {
   document.getElementById('cashflowsTable').innerHTML = html.join('');
 }
 
-async function savePosition() {
-  const payload = Object.fromEntries(columns.map(c => [c, document.getElementById(c).value]));
-  await fetch('/api/positions', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(payload)});
-  load();
-}
-
-async function del(id) {
-  await fetch('/api/positions/' + id, {method:'DELETE'});
-  load();
-}
-
 async function scrape() {
   const address = document.getElementById('wallet').value.trim();
   const out = await fetch('/api/scrape', {method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify({address})}).then(r=>r.json());
   alert(`Импортировано: ${out.imported ?? 0}`);
   load();
-}
-
-function toggleSync() {
-  if (syncTimer) {
-    clearInterval(syncTimer);
-    syncTimer = null;
-    document.getElementById('syncBtn').textContent = 'Включить синхронизацию';
-    document.getElementById('syncStatus').textContent = 'Синхронизация выключена.';
-    return;
-  }
-
-  const address = document.getElementById('wallet').value.trim();
-  if (!address) {
-    alert('Введите адрес кошелька перед запуском синхронизации.');
-    return;
-  }
-
-  scrape();
-  syncTimer = setInterval(scrape, 5 * 60 * 1000);
-  document.getElementById('syncBtn').textContent = 'Остановить синхронизацию';
-  document.getElementById('syncStatus').textContent = 'Синхронизация включена: скрапинг каждые 5 минут.';
 }
 
 load();
